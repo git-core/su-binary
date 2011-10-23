@@ -49,7 +49,6 @@ extern sqlite3 *database_init();
 extern int database_check(sqlite3*, struct su_initiator*, struct su_request*);
 
 /* Still lazt, will fix this */
-static char *socket_path = NULL;
 static sqlite3 *db = NULL;
 
 static struct su_initiator su_from = {
@@ -127,78 +126,15 @@ static int from_init(struct su_initiator *from)
     return 0;
 }
 
-static void socket_cleanup(void)
-{
-    unlink(socket_path);
-}
-
 static void cleanup(void)
 {
-    socket_cleanup();
     if (db) sqlite3_close(db);
-}
-
-static void cleanup_signal(int sig)
-{
-    socket_cleanup();
-    exit(sig);
-}
-
-static int socket_create_temp(unsigned req_uid)
-{
-    static char buf[PATH_MAX];
-    int fd, err;
-
-    struct sockaddr_un sun;
-
-    fd = socket(AF_LOCAL, SOCK_STREAM, 0);
-    if (fd < 0) {
-        PLOGE("socket");
-        return -1;
-    }
-
-    for (;;) {
-        memset(&sun, 0, sizeof(sun));
-        sun.sun_family = AF_LOCAL;
-        strcpy(buf, SOCKET_PATH_TEMPLATE);
-        socket_path = mktemp(buf);
-        snprintf(sun.sun_path, sizeof(sun.sun_path), "%s", socket_path);
-
-        if (bind(fd, (struct sockaddr*)&sun, sizeof(sun)) < 0) {
-            if (errno != EADDRINUSE) {
-                PLOGE("bind");
-                return -1;
-            }
-        } else {
-            break;
-        }
-    }
-
-    if (chmod(sun.sun_path, 0600) < 0) {
-        PLOGE("chmod(socket)");
-        unlink(sun.sun_path);
-        return -1;
-    }
-
-    if (chown(sun.sun_path, req_uid, req_uid) < 0) {
-        PLOGE("chown(socket)");
-        unlink(sun.sun_path);
-        return -1;
-    }
-
-    if (listen(fd, 1) < 0) {
-        PLOGE("listen");
-        return -1;
-    }
-
-    return fd;
 }
 
 static int socket_accept(int serv_fd)
 {
     struct timeval tv;
     fd_set fds;
-    int fd;
 
     /* Wait 20 seconds for a connection, then give up. */
     tv.tv_sec = 20;
@@ -210,13 +146,7 @@ static int socket_accept(int serv_fd)
         return -1;
     }
 
-    fd = accept(serv_fd, NULL, NULL);
-    if (fd < 0) {
-        PLOGE("accept");
-        return -1;
-    }
-
-    return fd;
+    return serv_fd;
 }
 
 static int socket_receive_result(int serv_fd, char *result, ssize_t result_len)
@@ -269,7 +199,7 @@ static void deny(void)
     struct su_initiator *from = &su_from;
     struct su_request *to = &su_to;
 
-    send_intent(&su_from, &su_to, "", 0, 1);
+    send_intent(&su_from, &su_to, -1, 0, 1);
     LOGW("request rejected (%u->%u %s)", from->uid, to->uid, to->command);
     fprintf(stderr, "%s\n", strerror(EACCES));
     exit(EXIT_FAILURE);
@@ -281,7 +211,7 @@ static void allow(char *shell)
     struct su_request *to = &su_to;
     char *exe = NULL;
 
-    send_intent(&su_from, &su_to, "", 1, 1);
+    send_intent(&su_from, &su_to, -1, 1, 1);
 
     if (!strcmp(shell, "")) {
         strcpy(shell , "/system/bin/sh");
@@ -304,7 +234,7 @@ static void allow(char *shell)
 int main(int argc, char *argv[])
 {
     struct stat st;
-    static int socket_serv_fd = -1;
+    int fd[2];
     char buf[64], shell[PATH_MAX], *result;
     int i, dballow;
     unsigned req_uid;
@@ -404,28 +334,22 @@ int main(int argc, char *argv[])
         case DB_INTERACTIVE: break;
         default: deny();
     }
-    
-    socket_serv_fd = socket_create_temp(req_uid);
-    if (socket_serv_fd < 0) {
+
+    if (socketpair(AF_LOCAL, SOCK_STREAM, 0, fd) < 0) {
         deny();
     }
 
-    signal(SIGHUP, cleanup_signal);
-    signal(SIGPIPE, cleanup_signal);
-    signal(SIGTERM, cleanup_signal);
-    signal(SIGABRT, cleanup_signal);
     atexit(cleanup);
 
-    if (send_intent(&su_from, &su_to, socket_path, -1, 0) < 0) {
+    if (send_intent(&su_from, &su_to, fd[1], -1, 0) < 0) {
         deny();
     }
+    close(fd[1]);
 
-    if (socket_receive_result(socket_serv_fd, buf, sizeof(buf)) < 0) {
+    if (socket_receive_result(fd[0], buf, sizeof(buf)) < 0) {
         deny();
     }
-
-    close(socket_serv_fd);
-    socket_cleanup();
+    close(fd[0]);
 
     result = buf;
 

@@ -55,7 +55,7 @@ enum {
     DB_ALLOW
 };
 
-extern int send_intent(struct su_initiator *from, struct su_request *to, const char *socket_path, int allow, int type);
+extern int send_intent(struct su_initiator *from, struct su_request *to, int fd, int allow, int type);
 
 #if 0
 #undef LOGE
